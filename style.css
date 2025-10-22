@@ -344,3 +344,31 @@ body {
 #download-replay:hover {
     background-color: #0b7dda;
 }
+
+#leaderboard-button.uploading {
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+#leaderboard-button.upload-complete {
+    animation: bounce 0.5s ease-in-out;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    50% {
+        transform: scale(1.1);
+        opacity: 0.8;
+    }
+}
+
+@keyframes bounce {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}

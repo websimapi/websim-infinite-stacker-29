@@ -15,6 +15,7 @@ let currentScore = 0;
 let isScoreSubmitted = false;
 let replayBlobPromise = null;
 let replayUrlPromise = null;
+let pendingSubmissions = []; // Track background submissions
 
 const room = new WebsimSocket();
 
@@ -121,109 +122,153 @@ async function autoSubmitScore(replayBlob) {
     if (isScoreSubmitted) return;
     isScoreSubmitted = true; // Prevent multiple submissions
 
-    try {
-        const currentUser = await window.websim.getCurrentUser();
-        if (!currentUser) {
-            ui.setSubmitStatus('Could not get user info.', '#f44336');
-            isScoreSubmitted = false;
-            return;
-        }
+    // Add visual indicator to trophy button
+    const leaderboardButton = document.getElementById('leaderboard-button');
+    leaderboardButton.classList.add('uploading');
+    leaderboardButton.textContent = '⏳';
 
-        // Get the user's current scores.
-        const allScores = room.collection('score_v1').getList();
-        const userScores = allScores.filter(score => score.username === currentUser.username);
-        userScores.sort((a, b) => a.score - b.score);
-
-        let shouldSubmit = false;
-        let lowestScoreRecord = null;
-
-        if (userScores.length < 3) {
-            shouldSubmit = true;
-        } else {
-            lowestScoreRecord = userScores[0];
-            if (currentScore > lowestScoreRecord.score) {
-                shouldSubmit = true;
-            }
-        }
-
-        if (!shouldSubmit) {
-            ui.setSubmitStatus('Score too low for leaderboard.', '#f44336');
-            return;
-        }
-        
-        let replayUrl = null;
-        if (replayBlob) {
-            // Verify blob is valid and has content
-            if (!replayBlob || replayBlob.size === 0) {
-                ui.setSubmitStatus('Replay is empty, cannot submit.', '#f44336');
+    const submissionPromise = (async () => {
+        try {
+            const currentUser = await window.websim.getCurrentUser();
+            if (!currentUser) {
+                ui.setSubmitStatus('Could not get user info.', '#f44336');
                 isScoreSubmitted = false;
+                leaderboardButton.classList.remove('uploading');
+                leaderboardButton.textContent = '🏆';
                 return;
             }
 
-            ui.setSubmitStatus('Uploading replay... (this may take a moment)', '#ff9800');
-            
-            try {
-                // Wait for the blob to be fully ready
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // Upload and verify success
-                replayUrl = await window.websim.upload(replayBlob);
-                
-                // Verify the URL is valid
-                if (!replayUrl || replayUrl.length === 0) {
-                    throw new Error('Upload returned invalid URL');
+            // Get the user's current scores.
+            const allScores = room.collection('score_v1').getList();
+            const userScores = allScores.filter(score => score.username === currentUser.username);
+            userScores.sort((a, b) => a.score - b.score);
+
+            let shouldSubmit = false;
+            let lowestScoreRecord = null;
+
+            if (userScores.length < 3) {
+                shouldSubmit = true;
+            } else {
+                lowestScoreRecord = userScores[0];
+                if (currentScore > lowestScoreRecord.score) {
+                    shouldSubmit = true;
                 }
-                
-                // Additional verification: try to fetch the uploaded file's headers
-                try {
-                    const response = await fetch(replayUrl, { method: 'HEAD' });
-                    if (!response.ok) {
-                        throw new Error('Uploaded file not accessible');
-                    }
-                } catch (verifyError) {
-                    throw new Error('Upload verification failed: ' + verifyError.message);
-                }
-                
-                ui.setSubmitStatus('Replay uploaded successfully! Submitting score...', '#4CAF50');
-            } catch (uploadError) {
-                console.error("Replay upload failed:", uploadError);
-                ui.setSubmitStatus('Replay upload failed. Score not submitted.', '#f44336');
-                isScoreSubmitted = false;
-                return; // Don't submit score if replay upload failed
             }
-        } else {
-            ui.setSubmitStatus('No replay available. Score not submitted.', '#f44336');
+
+            if (!shouldSubmit) {
+                ui.setSubmitStatus('Score too low for leaderboard.', '#f44336');
+                leaderboardButton.classList.remove('uploading');
+                leaderboardButton.textContent = '🏆';
+                return;
+            }
+            
+            let replayUrl = null;
+            if (replayBlob) {
+                // Verify blob is valid and has content
+                if (!replayBlob || replayBlob.size === 0) {
+                    ui.setSubmitStatus('Replay is empty, cannot submit.', '#f44336');
+                    isScoreSubmitted = false;
+                    leaderboardButton.classList.remove('uploading');
+                    leaderboardButton.textContent = '🏆';
+                    return;
+                }
+
+                ui.setSubmitStatus('Uploading replay... (this may take a moment)', '#ff9800');
+                
+                try {
+                    // Wait for the blob to be fully ready
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    
+                    // Upload and verify success - THIS MUST COMPLETE BEFORE DATABASE OPS
+                    replayUrl = await window.websim.upload(replayBlob);
+                    
+                    // Verify the URL is valid
+                    if (!replayUrl || replayUrl.length === 0) {
+                        throw new Error('Upload returned invalid URL');
+                    }
+                    
+                    // Additional verification: try to fetch the uploaded file's headers
+                    try {
+                        const response = await fetch(replayUrl, { method: 'HEAD' });
+                        if (!response.ok) {
+                            throw new Error('Uploaded file not accessible');
+                        }
+                    } catch (verifyError) {
+                        throw new Error('Upload verification failed: ' + verifyError.message);
+                    }
+                    
+                    ui.setSubmitStatus('Replay uploaded successfully! Submitting score...', '#4CAF50');
+                } catch (uploadError) {
+                    console.error("Replay upload failed:", uploadError);
+                    ui.setSubmitStatus('Replay upload failed. Score not submitted.', '#f44336');
+                    isScoreSubmitted = false;
+                    leaderboardButton.classList.remove('uploading');
+                    leaderboardButton.textContent = '🏆';
+                    return; // Don't submit score if replay upload failed
+                }
+            } else {
+                ui.setSubmitStatus('No replay available. Score not submitted.', '#f44336');
+                isScoreSubmitted = false;
+                leaderboardButton.classList.remove('uploading');
+                leaderboardButton.textContent = '🏆';
+                return; // Don't submit without replay
+            }
+
+            // Only proceed with database operations if we have a valid replayUrl
+            if (!replayUrl) {
+                ui.setSubmitStatus('Replay upload incomplete. Score not submitted.', '#f44336');
+                isScoreSubmitted = false;
+                leaderboardButton.classList.remove('uploading');
+                leaderboardButton.textContent = '🏆';
+                return;
+            }
+
+            ui.setSubmitStatus('Saving to leaderboard...', '#ff9800');
+
+            // Now that we have the video URL, perform database operations
+            if (lowestScoreRecord && userScores.length >= 3) {
+                // Update the lowest score
+                await room.collection('score_v1').update(lowestScoreRecord.id, { score: currentScore, replayUrl });
+                ui.setSubmitStatus('High score updated!', '#4CAF50');
+            } else {
+                // Create a new score record
+                await room.collection('score_v1').create({
+                    score: currentScore,
+                    replayUrl,
+                });
+                ui.setSubmitStatus('Score submitted!', '#4CAF50');
+            }
+
+            // Show success indicator on trophy button
+            leaderboardButton.classList.remove('uploading');
+            leaderboardButton.classList.add('upload-complete');
+            leaderboardButton.textContent = '✅';
+            
+            // Reset to trophy after 3 seconds
+            setTimeout(() => {
+                leaderboardButton.classList.remove('upload-complete');
+                leaderboardButton.textContent = '🏆';
+            }, 3000);
+
+        } catch (error) {
+            console.error("Failed to auto-submit score:", error);
+            ui.setSubmitStatus('Error submitting score.', '#f44336');
             isScoreSubmitted = false;
-            return; // Don't submit without replay
+            leaderboardButton.classList.remove('uploading');
+            leaderboardButton.textContent = '🏆';
         }
+    })();
 
-        // Only proceed with database operations if we have a valid replayUrl
-        if (!replayUrl) {
-            ui.setSubmitStatus('Replay upload incomplete. Score not submitted.', '#f44336');
-            isScoreSubmitted = false;
-            return;
+    // Track this submission so it continues in background
+    pendingSubmissions.push(submissionPromise);
+    
+    // Clean up after completion
+    submissionPromise.finally(() => {
+        const index = pendingSubmissions.indexOf(submissionPromise);
+        if (index > -1) {
+            pendingSubmissions.splice(index, 1);
         }
-
-        ui.setSubmitStatus('Saving to leaderboard...', '#ff9800');
-
-        if (lowestScoreRecord && userScores.length >= 3) {
-            // Update the lowest score
-            await room.collection('score_v1').update(lowestScoreRecord.id, { score: currentScore, replayUrl });
-            ui.setSubmitStatus('High score updated!', '#4CAF50');
-        } else {
-            // Create a new score record
-            await room.collection('score_v1').create({
-                score: currentScore,
-                replayUrl,
-            });
-            ui.setSubmitStatus('Score submitted!', '#4CAF50');
-        }
-
-    } catch (error) {
-        console.error("Failed to auto-submit score:", error);
-        ui.setSubmitStatus('Error submitting score.', '#f44336');
-        isScoreSubmitted = false; // Allow retry if submission fails
-    }
+    });
 }
 
 async function viewReplay() {
