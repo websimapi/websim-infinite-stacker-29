@@ -71,14 +71,14 @@ function init() {
                 replayBlobPromise.then(blob => {
                     ui.setReplayButtonState(false, 'Watch Replay');
                     if (!isScoreSubmitted) {
-                        autoSubmitScore(blob);
+                        autoSubmitScore(blob, score);
                     }
                 }).catch(error => {
                     console.error("Error getting replay blob:", error);
                     ui.setReplayButtonState(false, 'Replay Failed');
                 });
             } else {
-                autoSubmitScore(null);
+                autoSubmitScore(null, score);
             }
         }
     };
@@ -111,16 +111,19 @@ function startGame() {
 }
 
 function restart() {
-    if (replayRecorder && replayRecorder.isRecording) {
-        replayRecorder.stop();
-    }
+    // No longer need to manually stop, as it happens in onGameOver
+    // if (replayRecorder && replayRecorder.isRecording) {
+    //     replayRecorder.stop();
+    // }
     game.restart();
     startGame();
 }
 
-async function autoSubmitScore(replayBlob) {
-    if (isScoreSubmitted) return;
-    isScoreSubmitted = true; // Prevent multiple submissions
+async function autoSubmitScore(replayBlob, scoreToSubmit) {
+    if (!replayBlob) {
+        console.warn("Auto-submit cancelled: no replay blob.");
+        return;
+    }
 
     // Add visual indicator to trophy button
     const leaderboardButton = document.getElementById('leaderboard-button');
@@ -128,13 +131,11 @@ async function autoSubmitScore(replayBlob) {
     leaderboardButton.textContent = '⏳';
 
     const submissionPromise = (async () => {
+        let isScoreSubmitted = false; // Local state for this submission
         try {
             const currentUser = await window.websim.getCurrentUser();
             if (!currentUser) {
-                ui.setSubmitStatus('Could not get user info.', '#f44336');
-                isScoreSubmitted = false;
-                leaderboardButton.classList.remove('uploading');
-                leaderboardButton.textContent = '🏆';
+                console.error('Could not get user info for submission.');
                 return;
             }
 
@@ -150,119 +151,100 @@ async function autoSubmitScore(replayBlob) {
                 shouldSubmit = true;
             } else {
                 lowestScoreRecord = userScores[0];
-                if (currentScore > lowestScoreRecord.score) {
+                if (scoreToSubmit > lowestScoreRecord.score) {
                     shouldSubmit = true;
                 }
             }
 
             if (!shouldSubmit) {
-                ui.setSubmitStatus('Score too low for leaderboard.', '#f44336');
-                leaderboardButton.classList.remove('uploading');
-                leaderboardButton.textContent = '🏆';
+                console.log('Score too low for leaderboard.');
+                // We still want to remove the uploading indicator eventually
                 return;
             }
             
             let replayUrl = null;
             if (replayBlob) {
-                // Verify blob is valid and has content
-                if (!replayBlob || replayBlob.size === 0) {
-                    ui.setSubmitStatus('Replay is empty, cannot submit.', '#f44336');
-                    isScoreSubmitted = false;
-                    leaderboardButton.classList.remove('uploading');
-                    leaderboardButton.textContent = '🏆';
-                    return;
+                if (replayBlob.size === 0) {
+                     console.error("Replay is empty, cannot submit.");
+                     return;
                 }
 
-                ui.setSubmitStatus('Uploading replay... (this may take a moment)', '#ff9800');
-                
                 try {
-                    // Wait for the blob to be fully ready
                     await new Promise(resolve => setTimeout(resolve, 500));
-                    
-                    // Upload and verify success - THIS MUST COMPLETE BEFORE DATABASE OPS
                     replayUrl = await window.websim.upload(replayBlob);
                     
-                    // Verify the URL is valid
                     if (!replayUrl || replayUrl.length === 0) {
                         throw new Error('Upload returned invalid URL');
                     }
                     
-                    // Additional verification: try to fetch the uploaded file's headers
-                    try {
-                        const response = await fetch(replayUrl, { method: 'HEAD' });
-                        if (!response.ok) {
-                            throw new Error('Uploaded file not accessible');
-                        }
-                    } catch (verifyError) {
-                        throw new Error('Upload verification failed: ' + verifyError.message);
+                    const response = await fetch(replayUrl, { method: 'HEAD' });
+                    if (!response.ok) {
+                        throw new Error('Uploaded file not accessible');
                     }
-                    
-                    ui.setSubmitStatus('Replay uploaded successfully! Submitting score...', '#4CAF50');
                 } catch (uploadError) {
                     console.error("Replay upload failed:", uploadError);
-                    ui.setSubmitStatus('Replay upload failed. Score not submitted.', '#f44336');
-                    isScoreSubmitted = false;
-                    leaderboardButton.classList.remove('uploading');
-                    leaderboardButton.textContent = '🏆';
-                    return; // Don't submit score if replay upload failed
+                    if (ui.gameOverElement.classList.contains('hidden') === false) {
+                        ui.setSubmitStatus('Replay upload failed. Score not submitted.', '#f44336');
+                    }
+                    return; 
                 }
             } else {
-                ui.setSubmitStatus('No replay available. Score not submitted.', '#f44336');
-                isScoreSubmitted = false;
-                leaderboardButton.classList.remove('uploading');
-                leaderboardButton.textContent = '🏆';
-                return; // Don't submit without replay
-            }
-
-            // Only proceed with database operations if we have a valid replayUrl
-            if (!replayUrl) {
-                ui.setSubmitStatus('Replay upload incomplete. Score not submitted.', '#f44336');
-                isScoreSubmitted = false;
-                leaderboardButton.classList.remove('uploading');
-                leaderboardButton.textContent = '🏆';
+                 if (ui.gameOverElement.classList.contains('hidden') === false) {
+                    ui.setSubmitStatus('No replay available. Score not submitted.', '#f44336');
+                }
                 return;
             }
 
-            ui.setSubmitStatus('Saving to leaderboard...', '#ff9800');
-
-            // Now that we have the video URL, perform database operations
-            if (lowestScoreRecord && userScores.length >= 3) {
-                // Update the lowest score
-                await room.collection('score_v1').update(lowestScoreRecord.id, { score: currentScore, replayUrl });
-                ui.setSubmitStatus('High score updated!', '#4CAF50');
-            } else {
-                // Create a new score record
-                await room.collection('score_v1').create({
-                    score: currentScore,
-                    replayUrl,
-                });
-                ui.setSubmitStatus('Score submitted!', '#4CAF50');
+            if (!replayUrl) {
+                console.error('Replay upload incomplete. Score not submitted.');
+                return;
             }
 
-            // Show success indicator on trophy button
-            leaderboardButton.classList.remove('uploading');
-            leaderboardButton.classList.add('upload-complete');
-            leaderboardButton.textContent = '✅';
-            
-            // Reset to trophy after 3 seconds
-            setTimeout(() => {
-                leaderboardButton.classList.remove('upload-complete');
-                leaderboardButton.textContent = '🏆';
-            }, 3000);
+            if (ui.gameOverElement.classList.contains('hidden') === false) {
+                 ui.setSubmitStatus('Saving to leaderboard...', '#ff9800');
+            }
+
+            if (lowestScoreRecord && userScores.length >= 3) {
+                await room.collection('score_v1').update(lowestScoreRecord.id, { score: scoreToSubmit, replayUrl });
+                 if (ui.gameOverElement.classList.contains('hidden') === false) {
+                    ui.setSubmitStatus('High score updated!', '#4CAF50');
+                }
+            } else {
+                await room.collection('score_v1').create({
+                    score: scoreToSubmit,
+                    replayUrl,
+                });
+                if (ui.gameOverElement.classList.contains('hidden') === false) {
+                    ui.setSubmitStatus('Score submitted!', '#4CAF50');
+                }
+            }
+            isScoreSubmitted = true;
 
         } catch (error) {
             console.error("Failed to auto-submit score:", error);
-            ui.setSubmitStatus('Error submitting score.', '#f44336');
-            isScoreSubmitted = false;
-            leaderboardButton.classList.remove('uploading');
-            leaderboardButton.textContent = '🏆';
+            if (ui.gameOverElement.classList.contains('hidden') === false) {
+                ui.setSubmitStatus('Error submitting score.', '#f44336');
+            }
+        } finally {
+            // This block runs regardless of success or failure
+            if (isScoreSubmitted) {
+                leaderboardButton.classList.remove('uploading');
+                leaderboardButton.classList.add('upload-complete');
+                leaderboardButton.textContent = '✅';
+                
+                setTimeout(() => {
+                    leaderboardButton.classList.remove('upload-complete');
+                    leaderboardButton.textContent = '🏆';
+                }, 3000);
+            } else {
+                 // If submission failed or was skipped, just reset the icon
+                 leaderboardButton.classList.remove('uploading');
+                 leaderboardButton.textContent = '🏆';
+            }
         }
     })();
 
-    // Track this submission so it continues in background
     pendingSubmissions.push(submissionPromise);
-    
-    // Clean up after completion
     submissionPromise.finally(() => {
         const index = pendingSubmissions.indexOf(submissionPromise);
         if (index > -1) {
@@ -287,6 +269,8 @@ async function viewReplay() {
         const blob = await replayBlobPromise;
         if (blob) {
             ui.showReplayViewer(blob);
+        } else {
+            alert("Replay data is not available.");
         }
     } catch (error) {
         console.error("Error viewing replay:", error);
@@ -340,6 +324,14 @@ function setupEventListeners() {
             uiCamera.bottom = -window.innerHeight / 2;
             uiCamera.updateProjectionMatrix();
             canvasUI.onWindowResize();
+        }
+    });
+
+    window.addEventListener('beforeunload', (event) => {
+        if (pendingSubmissions.length > 0) {
+            event.preventDefault();
+            event.returnValue = ''; // For Chrome
+            return "Your score is still uploading. Are you sure you want to leave?"; // For older browsers
         }
     });
 }
